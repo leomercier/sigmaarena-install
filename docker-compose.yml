@@ -20,6 +20,8 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    ports:
+      - "4000:4000"
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       API_URL: ${API_URL:-https://sigmaarena-conclave-788594960999.europe-west1.run.app/v1}
