@@ -28,7 +28,6 @@ services:
       HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-15000}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-2}
     volumes:
-      - ./validator:/app
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
