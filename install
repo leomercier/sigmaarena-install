@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_BASE="https://solv-storage.validators.solutions"
+REPO_BASE="https://github.com/leomercier/sigmaarena-install/raw/main"
 WORKDIR="${SIGMA_DIR:-$HOME/sigmaarena}"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
