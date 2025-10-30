@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Default to the install dir, but allow override via SIGMA_DIR
 SIGMA_DIR="${SIGMA_DIR:-$HOME/sigmaarena}"
 COMPOSE_CMD="docker compose"
-COMPOSE_FILE="${SIGMA_DIR}/docker-compose.yml"
 ENV_FILE="${SIGMA_DIR}/.env"
+COMPOSE_FILE="${SIGMA_DIR}/docker-compose.yml"
+REPO_BASE="${SIGMA_REPO:-https://raw.githubusercontent.com/leomercier/sigmaarena-install/main}"
 
 die() { echo "$*" 1>&2; exit 1; }
-ensure_files() { [ -f "$COMPOSE_FILE" ] || die "Missing $COMPOSE_FILE. Run the install first."; }
+ensure_files() { [ -f "$COMPOSE_FILE" ] || die "Missing docker-compose.yml. Run the install first."; }
 
-# Cross-platform sed in-place
-sedi() {
-  if sed --version >/dev/null 2>&1; then
-    sed -i "$@"
-  else
-    # macOS BSD sed
-    sed -i '' "$@"
-  fi
-}
+sedi() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
 
 usage() {
   cat <<EOF
@@ -26,74 +18,163 @@ Usage:
   sigma start
   sigma stop
   sigma set --KEY "value" [--ANOTHER "value2"]
+  sigma status
+  sigma health
+  sigma monitor [validator|redis|watchtower]
+  sigma update [--compose] [--install] [--pull] [--restart]
 
-Env:
-  SIGMA_DIR overrides project dir. Default: $HOME/sigmaarena
+Notes:
+  update without flags only refreshes the CLI itself
+  --compose   refresh docker-compose.yml from repo
+  --install   refresh install script in project dir
+  --pull      docker compose pull
+  --restart   docker compose up -d (with ops profile)
 EOF
-}
-
-cmd_start() {
-  ensure_files
-  cd "$SIGMA_DIR"
-  $COMPOSE_CMD --profile ops up -d
-  echo "Started"
-}
-
-cmd_stop() {
-  ensure_files
-  cd "$SIGMA_DIR"
-  $COMPOSE_CMD down
-  echo "Stopped"
 }
 
 ensure_env() {
   mkdir -p "$SIGMA_DIR"
-  if [ ! -f "$ENV_FILE" ]; then
-    umask 077
-    touch "$ENV_FILE"
-  fi
+  [ -f "$ENV_FILE" ] || { umask 077; touch "$ENV_FILE"; }
 }
 
 set_kv() {
-  local raw="$1"
-  local val="$2"
-  local key="${raw#--}"    # strip leading --
+  local raw="$1" val="$2" key="${raw#--}"
   [ -n "$key" ] || die "Empty key"
   ensure_env
-
-  # Remove existing lines for key
-  if grep -qE "^${key}=" "$ENV_FILE"; then
-    sedi "s|^${key}=.*||" "$ENV_FILE"
-    # Clean empty lines
-    sedi "/^$/d" "$ENV_FILE"
-  fi
-  # Append quoted value
+  grep -qE "^${key}=" "$ENV_FILE" && { sedi "s|^${key}=.*||" "$ENV_FILE"; sedi "/^$/d" "$ENV_FILE"; }
   printf '%s="%s"\n' "$key" "$val" >> "$ENV_FILE"
   echo "Set $key"
 }
 
 cmd_set() {
-  ensure_env
   [ $# -ge 2 ] || die "sigma set --KEY \"value\""
   while [ $# -gt 0 ]; do
     k="$1"; shift || true
     v="${1:-}"
-    # If value is missing or next token starts with --, error
-    if [ -z "$v" ] || [[ "$v" == --* ]]; then
-      die "Missing value for $k"
-    fi
+    [ -n "$v" ] && [[ "$v" != --* ]] || die "Missing value for $k"
     set_kv "$k" "$v"
     shift || true
   done
   echo "Updated $ENV_FILE"
 }
 
+cid_of() { $COMPOSE_CMD -f "$COMPOSE_FILE" -p sigmaarena ps -q "$1" 2>/dev/null || true; }
+state_of() { local cid="$1"; [ -n "$cid" ] || { echo "not-running"; return; }; docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo "unknown"; }
+health_of() { local cid="$1"; [ -n "$cid" ] || { echo "n/a"; return; }; docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo "unknown"; }
+
+cmd_status() {
+  ensure_files
+  cd "$SIGMA_DIR"
+  local rcid=$(cid_of redis) vcid=$(cid_of validator) wcid=$(cid_of watchtower)
+  printf "redis      state=%s  health=%s\n"      "$(state_of "$rcid")" "$(health_of "$rcid")"
+  printf "validator  state=%s  health=%s\n"      "$(state_of "$vcid")" "$(health_of "$vcid")"
+  printf "watchtower state=%s  health=%s\n"      "$(state_of "$wcid")" "$(health_of "$wcid")"
+}
+
+cmd_health() {
+  ensure_files
+  cd "$SIGMA_DIR"
+  local rcid=$(cid_of redis) vcid=$(cid_of validator)
+  echo "Redis:"
+  echo "  state:  $(state_of "$rcid")"
+  echo "  health: $(health_of "$rcid")"
+  echo "Validator:"
+  echo "  state:  $(state_of "$vcid")"
+  if [ -n "$vcid" ]; then
+    echo "  recent:"
+    docker logs --tail 200 "$vcid" 2>/dev/null | grep -iE 'heartbeat|beat|ready|connected' | tail -n 20 || echo "    no heartbeat lines found"
+  else
+    echo "  not running"
+  fi
+}
+
+cmd_monitor() {
+  ensure_files
+  cd "$SIGMA_DIR"
+  local svc="${1:-validator}"
+  case "$svc" in validator|redis|watchtower) ;; *) die "Unknown service: $svc";; esac
+  $COMPOSE_CMD -p sigmaarena logs -f --tail 100 "$svc"
+}
+
+cmd_start() {
+  ensure_files
+  cd "$SIGMA_DIR"
+  $COMPOSE_CMD -p sigmaarena --profile ops up -d
+  echo "Started"
+}
+
+cmd_stop() {
+  ensure_files
+  cd "$SIGMA_DIR"
+  $COMPOSE_CMD -p sigmaarena down
+  echo "Stopped"
+}
+
+install_cli() {
+  local tmp
+  tmp="$(mktemp)"
+  curl -sSfL "$REPO_BASE/sigma" -o "$tmp"
+  chmod +x "$tmp"
+  sudo mv "$tmp" /usr/local/bin/sigma
+  echo "CLI reinstalled to /usr/local/bin/sigma"
+}
+
+refresh_compose() {
+  mkdir -p "$SIGMA_DIR"
+  curl -sSfL "$REPO_BASE/docker-compose.yml" -o "$COMPOSE_FILE"
+  echo "Refreshed $COMPOSE_FILE"
+}
+
+refresh_install() {
+  curl -sSfL "$REPO_BASE/install" -o "$SIGMA_DIR/install"
+  chmod +x "$SIGMA_DIR/install"
+  echo "Refreshed $SIGMA_DIR/install"
+}
+
+cmd_update() {
+  local do_compose=0 do_install=0 do_pull=0 do_restart=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --compose) do_compose=1 ;;
+      --install) do_install=1 ;;
+      --pull) do_pull=1 ;;
+      --restart) do_restart=1 ;;
+      *) die "Unknown flag: $1" ;;
+    esac
+    shift
+  done
+
+  install_cli
+
+  [ $do_compose -eq 1 ] && refresh_compose
+  [ $do_install -eq 1 ] && refresh_install
+
+  if [ $do_pull -eq 1 ]; then
+    ensure_files
+    cd "$SIGMA_DIR"
+    $COMPOSE_CMD -p sigmaarena pull
+  fi
+
+  if [ $do_restart -eq 1 ]; then
+    ensure_files
+    cd "$SIGMA_DIR"
+    $COMPOSE_CMD -p sigmaarena --profile ops up -d
+    echo "Services restarted"
+  fi
+
+  echo "Update complete"
+}
+
 main() {
   sub="${1:-}"
   case "$sub" in
     start) shift; cmd_start "$@";;
-    stop)  shift; cmd_stop "$@";;
-    set)   shift; cmd_set "$@";;
+    stop) shift; cmd_stop "$@";;
+    set) shift; cmd_set "$@";;
+    status) shift; cmd_status "$@";;
+    health) shift; cmd_health "$@";;
+    monitor) shift; cmd_monitor "${1:-validator}";;
+    update) shift; cmd_update "$@";;
     ""|help|-h|--help) usage;;
     *) die "Unknown command: $sub";;
   esac
