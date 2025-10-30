@@ -5,37 +5,38 @@ SIGMA_DIR="${SIGMA_DIR:-$HOME/sigmaarena}"
 COMPOSE_CMD="docker compose"
 ENV_FILE="${SIGMA_DIR}/.env"
 COMPOSE_FILE="${SIGMA_DIR}/docker-compose.yml"
-REPO_BASE="${SIGMA_REPO:-https://raw.githubusercontent.com/leomercier/sigmaarena-install/main}"
+REPO_OWNER="leomercier"
+REPO_NAME="sigmaarena-install"
+DEFAULT_REF="${SIGMA_DEFAULT_REF:-main}"
+VERSION_FILE="${SIGMA_DIR}/.sigma-version"
 
 die() { echo "$*" 1>&2; exit 1; }
 ensure_files() { [ -f "$COMPOSE_FILE" ] || die "Missing docker-compose.yml. Run the install first."; }
-
 sedi() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
+raw_url() { printf "https://raw.githubusercontent.com/%s/%s/%s/%s" "$REPO_OWNER" "$REPO_NAME" "$1" "$2"; }
+
+current_ref() {
+  if [ -f "$VERSION_FILE" ]; then tr -d ' \n\r' < "$VERSION_FILE"; else echo "$DEFAULT_REF"; fi
+}
+set_ref() { mkdir -p "$SIGMA_DIR"; printf "%s\n" "$1" > "$VERSION_FILE"; }
 
 usage() {
   cat <<EOF
 Usage:
   sigma start
   sigma stop
-  sigma set --KEY "value" [--ANOTHER "value2"]
+  sigma set --KEY "value"
   sigma status
   sigma health
   sigma monitor [validator|redis|watchtower]
-  sigma update [--compose] [--install] [--pull] [--restart]
-
-Notes:
-  update without flags only refreshes the CLI itself
-  --compose   refresh docker-compose.yml from repo
-  --install   refresh install script in project dir
-  --pull      docker compose pull
-  --restart   docker compose up -d (with ops profile)
+  sigma update [--to <ref|sha>] [--pull] [--restart]
+  sigma update-watchtower
+  sigma version
 EOF
 }
 
-ensure_env() {
-  mkdir -p "$SIGMA_DIR"
-  [ -f "$ENV_FILE" ] || { umask 077; touch "$ENV_FILE"; }
-}
+# ----- Basic env & config -----
+ensure_env() { mkdir -p "$SIGMA_DIR"; [ -f "$ENV_FILE" ] || { umask 077; touch "$ENV_FILE"; }; }
 
 set_kv() {
   local raw="$1" val="$2" key="${raw#--}"
@@ -49,120 +50,88 @@ set_kv() {
 cmd_set() {
   [ $# -ge 2 ] || die "sigma set --KEY \"value\""
   while [ $# -gt 0 ]; do
-    k="$1"; shift || true
-    v="${1:-}"
+    k="$1"; shift; v="${1:-}"
     [ -n "$v" ] && [[ "$v" != --* ]] || die "Missing value for $k"
-    set_kv "$k" "$v"
-    shift || true
+    set_kv "$k" "$v"; shift || true
   done
   echo "Updated $ENV_FILE"
 }
 
+# ----- Container helpers -----
 cid_of() { $COMPOSE_CMD -f "$COMPOSE_FILE" -p sigmaarena ps -q "$1" 2>/dev/null || true; }
 state_of() { local cid="$1"; [ -n "$cid" ] || { echo "not-running"; return; }; docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo "unknown"; }
 health_of() { local cid="$1"; [ -n "$cid" ] || { echo "n/a"; return; }; docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo "unknown"; }
 
+# ----- Core Commands -----
 cmd_status() {
-  ensure_files
-  cd "$SIGMA_DIR"
+  ensure_files; cd "$SIGMA_DIR"
   local rcid=$(cid_of redis) vcid=$(cid_of validator) wcid=$(cid_of watchtower)
-  printf "redis      state=%s  health=%s\n"      "$(state_of "$rcid")" "$(health_of "$rcid")"
-  printf "validator  state=%s  health=%s\n"      "$(state_of "$vcid")" "$(health_of "$vcid")"
-  printf "watchtower state=%s  health=%s\n"      "$(state_of "$wcid")" "$(health_of "$wcid")"
+  printf "redis      state=%s  health=%s\n" "$(state_of "$rcid")" "$(health_of "$rcid")"
+  printf "validator  state=%s  health=%s\n" "$(state_of "$vcid")" "$(health_of "$vcid")"
+  printf "watchtower state=%s  health=%s\n" "$(state_of "$wcid")" "$(health_of "$wcid")"
 }
 
 cmd_health() {
-  ensure_files
-  cd "$SIGMA_DIR"
+  ensure_files; cd "$SIGMA_DIR"
   local rcid=$(cid_of redis) vcid=$(cid_of validator)
-  echo "Redis:"
-  echo "  state:  $(state_of "$rcid")"
-  echo "  health: $(health_of "$rcid")"
-  echo "Validator:"
-  echo "  state:  $(state_of "$vcid")"
+  echo "Redis: $(state_of "$rcid") / $(health_of "$rcid")"
+  echo "Validator: $(state_of "$vcid")"
   if [ -n "$vcid" ]; then
-    echo "  recent:"
-    docker logs --tail 200 "$vcid" 2>/dev/null | grep -iE 'heartbeat|beat|ready|connected' | tail -n 20 || echo "    no heartbeat lines found"
-  else
-    echo "  not running"
+    docker logs --tail 200 "$vcid" 2>/dev/null | grep -iE 'heartbeat|ready|connected' | tail -n 15 || echo "no heartbeat lines"
   fi
 }
 
 cmd_monitor() {
-  ensure_files
-  cd "$SIGMA_DIR"
+  ensure_files; cd "$SIGMA_DIR"
   local svc="${1:-validator}"
   case "$svc" in validator|redis|watchtower) ;; *) die "Unknown service: $svc";; esac
   $COMPOSE_CMD -p sigmaarena logs -f --tail 100 "$svc"
 }
 
-cmd_start() {
-  ensure_files
-  cd "$SIGMA_DIR"
-  $COMPOSE_CMD -p sigmaarena --profile ops up -d
-  echo "Started"
-}
+cmd_start() { ensure_files; cd "$SIGMA_DIR"; $COMPOSE_CMD -p sigmaarena --profile ops up -d; echo "Started"; }
+cmd_stop() { ensure_files; cd "$SIGMA_DIR"; $COMPOSE_CMD -p sigmaarena down; echo "Stopped"; }
 
-cmd_stop() {
-  ensure_files
-  cd "$SIGMA_DIR"
-  $COMPOSE_CMD -p sigmaarena down
-  echo "Stopped"
-}
-
-install_cli() {
-  local tmp
-  tmp="$(mktemp)"
-  curl -sSfL "$REPO_BASE/sigma" -o "$tmp"
-  chmod +x "$tmp"
-  sudo mv "$tmp" /usr/local/bin/sigma
-  echo "CLI reinstalled to /usr/local/bin/sigma"
-}
-
-refresh_compose() {
-  mkdir -p "$SIGMA_DIR"
-  curl -sSfL "$REPO_BASE/docker-compose.yml" -o "$COMPOSE_FILE"
-  echo "Refreshed $COMPOSE_FILE"
-}
-
-refresh_install() {
-  curl -sSfL "$REPO_BASE/install" -o "$SIGMA_DIR/install"
-  chmod +x "$SIGMA_DIR/install"
-  echo "Refreshed $SIGMA_DIR/install"
-}
+# ----- Update / Version -----
+install_cli_from_ref() { local tmp; tmp=$(mktemp); curl -sSfL "$(raw_url "$1" "sigma")" -o "$tmp"; chmod +x "$tmp"; sudo mv "$tmp" /usr/local/bin/sigma; echo "CLI updated from $1"; }
+refresh_install_from_ref() { curl -sSfL "$(raw_url "$1" "install")" -o "$SIGMA_DIR/install"; chmod +x "$SIGMA_DIR/install"; echo "install script updated"; }
+refresh_compose_from_ref() { curl -sSfL "$(raw_url "$1" "docker-compose.yml")" -o "$COMPOSE_FILE"; sedi '/^version:/d' "$COMPOSE_FILE"; echo "compose updated"; }
 
 cmd_update() {
-  local do_compose=0 do_install=0 do_pull=0 do_restart=0
+  local ref="" do_pull=0 do_restart=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --compose) do_compose=1 ;;
-      --install) do_install=1 ;;
-      --pull) do_pull=1 ;;
-      --restart) do_restart=1 ;;
-      *) die "Unknown flag: $1" ;;
-    esac
-    shift
+      --to) shift; ref="${1:-}"; [ -n "$ref" ] || die "Missing value for --to";;
+      --pull) do_pull=1;;
+      --restart) do_restart=1;;
+      *) die "Unknown flag: $1";;
+    esac; shift || true
   done
 
-  install_cli
+  local target_ref="${ref:-$(current_ref)}"
+  set_ref "$target_ref"
 
-  [ $do_compose -eq 1 ] && refresh_compose
-  [ $do_install -eq 1 ] && refresh_install
+  install_cli_from_ref "$target_ref"
+  refresh_install_from_ref "$target_ref"
+  refresh_compose_from_ref "$target_ref"
 
-  if [ $do_pull -eq 1 ]; then
-    ensure_files
-    cd "$SIGMA_DIR"
-    $COMPOSE_CMD -p sigmaarena pull
-  fi
+  [ $do_pull -eq 1 ] && { ensure_files; cd "$SIGMA_DIR"; $COMPOSE_CMD -p sigmaarena pull; }
+  [ $do_restart -eq 1 ] && { ensure_files; cd "$SIGMA_DIR"; $COMPOSE_CMD -p sigmaarena --profile ops up -d; echo "Services restarted"; }
 
-  if [ $do_restart -eq 1 ]; then
-    ensure_files
-    cd "$SIGMA_DIR"
-    $COMPOSE_CMD -p sigmaarena --profile ops up -d
-    echo "Services restarted"
-  fi
+  echo "Updated to ref: $(current_ref)"
+}
 
-  echo "Update complete"
+cmd_update_watchtower() {
+  local cname
+  cname=$(docker ps --format '{{.Names}}' | grep watchtower || true)
+  [ -n "$cname" ] || die "No running watchtower container found"
+  docker exec "$cname" watchtower --run-once --cleanup --label-enable
+  echo "Watchtower update triggered manually."
+}
+
+cmd_version() {
+  echo "Pinned ref: $(current_ref)"
+  echo "Repo: $REPO_OWNER/$REPO_NAME"
+  echo "Project dir: $SIGMA_DIR"
 }
 
 main() {
@@ -175,6 +144,8 @@ main() {
     health) shift; cmd_health "$@";;
     monitor) shift; cmd_monitor "${1:-validator}";;
     update) shift; cmd_update "$@";;
+    update-watchtower) shift; cmd_update_watchtower;;
+    version) shift; cmd_version;;
     ""|help|-h|--help) usage;;
     *) die "Unknown command: $sub";;
   esac

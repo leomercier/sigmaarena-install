@@ -1,33 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_BASE="https://github.com/leomercier/sigmaarena-install/raw/main"
-WORKDIR="${SIGMA_DIR:-$HOME/sigmaarena}"
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
+REPO_OWNER="leomercier"
+REPO_NAME="sigmaarena-install"
+DEFAULT_REF="${SIGMA_DEFAULT_REF:-main}"
+SIGMA_DIR="${SIGMA_DIR:-$HOME/sigmaarena}"
+VERSION_FILE="$SIGMA_DIR/.sigma-version"
+
+mkdir -p "$SIGMA_DIR"
+cd "$SIGMA_DIR"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing $1. Install it first."; exit 1; }; }
-
 need_cmd curl
 need_cmd docker
 
-# Pick docker compose command
-if docker compose version >/dev/null 2>&1; then
-  echo "Using docker compose plugin"
-else
-  echo "docker compose plugin not found"
-  echo "Install Docker Desktop or the compose plugin"
+if ! docker compose version >/dev/null 2>&1; then
+  echo "Docker Compose plugin not found. Install Docker Desktop or the compose plugin."
   exit 1
 fi
 
-echo "Fetching docker-compose.yml..."
-curl -sSfL "$REPO_BASE/docker-compose.yml" -o docker-compose.yml
+raw_url() {
+  printf "https://raw.githubusercontent.com/%s/%s/%s/%s" "$REPO_OWNER" "$REPO_NAME" "$1" "$2"
+}
 
-# Create .env if missing
+current_ref() {
+  if [ -f "$VERSION_FILE" ]; then
+    tr -d ' \n\r' < "$VERSION_FILE"
+  else
+    echo "$DEFAULT_REF"
+  fi
+}
+
+set_ref() { printf "%s\n" "$1" > "$VERSION_FILE"; }
+
+REF="$(current_ref)"
+
+echo "Installing SigmaArena Validator (ref: $REF)..."
+
+curl -sSfL "$(raw_url "$REF" "docker-compose.yml")" -o docker-compose.yml
+sedi() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
+sedi '/^version:/d' docker-compose.yml
+
 if [ ! -f .env ]; then
   umask 077
   cat > .env <<'EOF'
-# Populate your secrets here
 VALIDATOR_MNEMONIC=""
 NODE_ENV=production
 API_URL=https://sigmaarena-conclave-788594960999.europe-west1.run.app/v1
@@ -35,18 +51,17 @@ REDIS_URL=redis://redis:6379
 HEARTBEAT_INTERVAL_MS=15000
 MAX_CONCURRENT_TASKS=2
 EOF
-  echo "Created .env with placeholders"
+  echo "Created default .env"
 fi
 
-# Fetch sigma CLI
-TMP_SIGMA="$(mktemp)"
-curl -sSfL "$REPO_BASE/sigma" -o "$TMP_SIGMA"
-chmod +x "$TMP_SIGMA"
-sudo mv "$TMP_SIGMA" /usr/local/bin/sigma
+curl -sSfL "$(raw_url "$REF" "sigma")" -o /tmp/sigma
+chmod +x /tmp/sigma
+sudo mv /tmp/sigma /usr/local/bin/sigma
 
-echo "Installed sigma -> /usr/local/bin/sigma"
-echo "Project dir -> $WORKDIR"
+set_ref "$REF"
+
+echo "Installation complete."
 echo "Next steps:"
-echo "  cd \"$WORKDIR\""
+echo "  cd $SIGMA_DIR"
 echo "  sigma set --VALIDATOR_MNEMONIC \"your mnemonic here\""
 echo "  sigma start"
