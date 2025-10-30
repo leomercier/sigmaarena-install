@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_BASE="https://solv-storage.validators.solutions"
+WORKDIR="${SIGMA_DIR:-$HOME/sigmaarena}"
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing $1. Install it first."; exit 1; }; }
+
+need_cmd curl
+need_cmd docker
+
+# Pick docker compose command
+if docker compose version >/dev/null 2>&1; then
+  echo "Using docker compose plugin"
+else
+  echo "docker compose plugin not found"
+  echo "Install Docker Desktop or the compose plugin"
+  exit 1
+fi
+
+echo "Fetching docker-compose.yml..."
+curl -sSfL "$REPO_BASE/docker-compose.yml" -o docker-compose.yml
+
+# Create .env if missing
+if [ ! -f .env ]; then
+  umask 077
+  cat > .env <<'EOF'
+# Populate your secrets here
+VALIDATOR_MNEMONIC=""
+NODE_ENV=production
+API_URL=https://sigmaarena-conclave-788594960999.europe-west1.run.app/v1
+REDIS_URL=redis://redis:6379
+HEARTBEAT_INTERVAL_MS=15000
+MAX_CONCURRENT_TASKS=2
+EOF
+  echo "Created .env with placeholders"
+fi
+
+# Fetch sigma CLI
+TMP_SIGMA="$(mktemp)"
+curl -sSfL "$REPO_BASE/sigma" -o "$TMP_SIGMA"
+chmod +x "$TMP_SIGMA"
+sudo mv "$TMP_SIGMA" /usr/local/bin/sigma
+
+echo "Installed sigma -> /usr/local/bin/sigma"
+echo "Project dir -> $WORKDIR"
+echo "Next steps:"
+echo "  cd \"$WORKDIR\""
+echo "  sigma set --VALIDATOR_MNEMONIC \"your mnemonic here\""
+echo "  sigma start"
