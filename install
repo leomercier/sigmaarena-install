@@ -11,8 +11,12 @@ mkdir -p "$SIGMA_DIR"
 cd "$SIGMA_DIR"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing $1. Install it first."; exit 1; }; }
+
 need_cmd curl
 need_cmd docker
+need_cmd node
+need_cmd npm
+need_cmd npx
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "Docker Compose plugin not found. Install Docker Desktop or the compose plugin."
